@@ -18,7 +18,6 @@
 #include <stdint.h>
 
 #include "rex_parser.h"
-#include "rexwav_reader.h"
 
 /* ------------------------------------------------------------------ */
 /* Plugin API definitions (inline to avoid path issues)               */

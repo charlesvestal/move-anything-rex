@@ -13,7 +13,7 @@ ReCycle, Reason, and other DAWs.
   - [SINF — Sound Information](#sinf--sound-information)
   - [SLCE — Slice Definition](#slce--slice-definition)
   - [SDAT — Compressed Audio](#sdat--compressed-audio)
-- [Slice Length Computation](#slice-length-computation)
+- [Slice Filtering](#slice-filtering)
 - [DWOP Codec](#dwop-codec)
   - [Overview](#overview)
   - [Initial State](#initial-state)
@@ -22,6 +22,7 @@ ReCycle, Reason, and other DAWs.
   - [Predictor Update Rules](#predictor-update-rules)
   - [Bit Reader](#bit-reader)
   - [Constants](#constants)
+- [Stereo Encoding (L/Delta)](#stereo-encoding-ldelta)
 - [Worked Example](#worked-example)
 - [Verification](#verification)
 
@@ -116,23 +117,34 @@ reads as 0.
 
 ### SLCE — Slice Definition
 
-Each SLCE chunk defines one slice boundary. There is one SLCE chunk per slice,
-appearing in order.
+Each SLCE chunk defines one slice or transient marker. There is one SLCE chunk
+per entry, appearing in order. The chunk data is 11 bytes:
 
 | Offset | Size | Type | Field |
 |--------|------|------|-------|
 | 0 | 4 | uint32 | Sample offset into decoded PCM buffer |
+| 4 | 4 | uint32 | Sample length (1 = transient marker, >1 = audio slice) |
+| 8 | 2 | uint16 | Amplitude / sensitivity (0x7FFF = max) |
+| 10 | 1 | uint8 | Zero |
 
-The sample offset is an absolute index into the decoded audio. For example, if
-the first slice has offset 322, then `decoded[322]` is the first sample of
-slice 0.
+The sample offset is an absolute per-channel frame index into the decoded audio.
+For example, if the first slice has offset 322, then `decoded[322]` is the first
+sample of slice 0 (for mono), or `decoded[322*2]` / `decoded[322*2+1]` for
+stereo L/R.
 
-**Note:** Some REX2 files contain SLCE chunks that are transient markers rather
-than audio slices. The REX SDK reports fewer slices (e.g. 10) than the total
-SLCE chunk count in the IFF structure (e.g. 32). Marker slices typically have
-very short computed lengths (1 sample).
+**Real slices vs transient markers:** SLCE entries with `sample_length > 1`
+are playable audio slices. Entries with `sample_length = 1` are transient
+markers (sub-slice positions used by ReCycle's sensitivity control) and should
+be filtered out for playback. Real slice lengths chain together:
+`offset[n] + length[n] = offset[next real slice]`.
 
-Minimum chunk data length: **4 bytes**.
+For example, `120Mono.rx2` has 32 SLCE chunks but only 12 are real audio
+slices. The remaining 20 are transient markers interleaved between them.
+
+**Edge case:** If all SLCE entries have `sample_length <= 1` (e.g. a
+single-slice file), treat the entire decoded buffer as one slice.
+
+Minimum chunk data length: **8 bytes**.
 
 ### SDAT — Compressed Audio
 
@@ -141,20 +153,20 @@ directly to the DWOP decoder. See [DWOP Codec](#dwop-codec) below.
 
 ---
 
-## Slice Length Computation
+## Slice Filtering
 
-Slice lengths are **not** stored in the file. They are derived from consecutive
-slice offsets after parsing:
+Slice lengths **are** stored in the SLCE chunk (bytes 4–7). To get the playable
+slice list:
 
-```
-For slice i (not the last):
-    length[i] = offset[i + 1] - offset[i]
+1. Parse all SLCE chunks
+2. Discard entries with `sample_length <= 1` (transient markers)
+3. The remaining entries are the real audio slices with correct offsets and
+   lengths
+4. If all entries were discarded, fall back to a single slice covering the
+   entire decoded buffer
 
-For the last slice:
-    length[last] = total_sample_length - offset[last]
-```
-
-If a computed length would extend past the decoded PCM buffer, it is clamped.
+The real slices form a contiguous chain: the last real slice's
+`offset + length` equals `total_sample_length`.
 
 ---
 

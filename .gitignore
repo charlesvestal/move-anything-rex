@@ -1,0 +1,9 @@
+# Build artifacts
+build/
+dist/
+
+# macOS
+.DS_Store
+
+# Test output WAVs
+*.wav
