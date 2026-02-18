@@ -74,40 +74,58 @@ static void parse_head(rex_file_t *rex, const uint8_t *data, uint32_t len)
 
 /* Parse SINF chunk: sound info
  * Layout (offsets relative to chunk data start):
- *   [0]     channels? or version
- *   [1]     unknown
+ *   [0]     channels (1=mono, 2=stereo)
+ *   [1]     bit depth indicator (3=16-bit, 5=24-bit)
  *   [2:4]   unknown
  *   [4:6]   sample rate (uint16, e.g. 0xAC44 = 44100)
- *   [6:10]  total sample length (uint32)
+ *   [6:10]  total sample length in per-channel frames (uint32)
  */
 static void parse_sinf(rex_file_t *rex, const uint8_t *data, uint32_t len)
 {
     if (len < 10) return;
 
+    /* Channel count from byte 0 */
+    int ch = data[0];
+    if (ch == 1 || ch == 2)
+        rex->channels = ch;
+
     /* Extract sample rate */
     uint16_t sr = read_u16_be(data + 4);
     if (sr > 0) rex->sample_rate = sr;
 
-    /* Total decoded audio length in samples */
+    /* Total decoded audio length in per-channel frames */
     rex->total_sample_length = read_u32_be(data + 6);
 }
 
 /* Parse SLCE chunk: per-slice info
- * Only the sample offset is reliable; the second uint32 is NOT a length.
- * Lengths are computed after all slices are collected. */
+ * Layout (11 bytes):
+ *   [0:4]  sample offset (uint32 BE)
+ *   [4:8]  sample length (uint32 BE) — 1 = transient marker, >1 = real audio slice
+ *   [8:10] amplitude/sensitivity (uint16 BE)
+ *   [10]   zero
+ *
+ * Transient markers (length=1) are sub-slice positions within real slices.
+ * Only real slices (length > 1) are kept for playback. */
 static void parse_slce(rex_file_t *rex, const uint8_t *data, uint32_t len)
 {
-    if (len < 4) return;
+    if (len < 8) return;
     if (rex->slice_count >= REX_MAX_SLICES) return;
 
+    uint32_t offset = read_u32_be(data + 0);
+    uint32_t sample_len = read_u32_be(data + 4);
+
+    /* Skip transient markers (length=1) — these are not playable slices */
+    if (sample_len <= 1) return;
+
     rex_slice_t *s = &rex->slices[rex->slice_count];
-    s->sample_offset = read_u32_be(data + 0);
-    s->sample_length = 0;  /* computed later */
+    s->sample_offset = offset;
+    s->sample_length = sample_len;
     rex->slice_count++;
 }
 
 /* Decode SDAT chunk: DWOP compressed audio.
- * Uses a 5-predictor adaptive lossless codec with energy-based selection. */
+ * Uses a 5-predictor adaptive lossless codec with energy-based selection.
+ * Stereo files use L/delta encoding (R = L + delta). */
 static int decode_sdat(rex_file_t *rex, const uint8_t *data, uint32_t len)
 {
     if (len < 1) {
@@ -115,28 +133,38 @@ static int decode_sdat(rex_file_t *rex, const uint8_t *data, uint32_t len)
         return -1;
     }
 
-    /* Allocate output buffer */
-    int max_samples;
+    /* Max frames (per-channel sample count) */
+    int max_frames;
     if (rex->total_sample_length > 0) {
-        max_samples = (int)rex->total_sample_length;
+        max_frames = (int)rex->total_sample_length;
     } else {
-        max_samples = (int)(len * 2) + 1024;
+        max_frames = (int)(len * 2) + 1024;
     }
-    /* Hard cap: no REX file should have more than 10M samples (~3.8 min @ 44.1kHz) */
-    if (max_samples > 10000000) {
-        max_samples = 10000000;
+    /* Hard cap: no REX file should have more than 10M frames (~3.8 min @ 44.1kHz) */
+    if (max_frames > 10000000) {
+        max_frames = 10000000;
     }
 
-    rex->pcm_data = (int16_t *)malloc(max_samples * sizeof(int16_t));
+    int is_stereo = (rex->channels == 2);
+
+    /* Allocate output: stereo needs 2x for interleaved L/R */
+    size_t alloc_samples = (size_t)max_frames * (is_stereo ? 2 : 1);
+    rex->pcm_data = (int16_t *)malloc(alloc_samples * sizeof(int16_t));
     if (!rex->pcm_data) {
-        snprintf(rex->error, sizeof(rex->error), "Failed to allocate %d samples", max_samples);
+        snprintf(rex->error, sizeof(rex->error), "Failed to allocate %zu samples", alloc_samples);
         return -1;
     }
 
-    /* Decode SDAT with DWOP codec */
-    dwop_state_t dwop;
-    dwop_init(&dwop, data, (int)len);
-    rex->pcm_samples = dwop_decode(&dwop, rex->pcm_data, max_samples);
+    if (is_stereo) {
+        rex->pcm_samples = dwop_decode_stereo(data, (int)len,
+                                               rex->pcm_data, max_frames);
+        rex->pcm_channels = 2;
+    } else {
+        dwop_state_t dwop;
+        dwop_init(&dwop, data, (int)len);
+        rex->pcm_samples = dwop_decode(&dwop, rex->pcm_data, max_frames);
+        rex->pcm_channels = 1;
+    }
 
     if (rex->pcm_samples <= 0) {
         snprintf(rex->error, sizeof(rex->error), "DWOP decode produced no samples");
@@ -144,8 +172,6 @@ static int decode_sdat(rex_file_t *rex, const uint8_t *data, uint32_t len)
         rex->pcm_data = NULL;
         return -1;
     }
-
-    rex->pcm_channels = 1;
 
     return 0;
 }
@@ -198,25 +224,16 @@ static int parse_chunks(rex_file_t *rex, const uint8_t *data, size_t boundary,
     return 0;
 }
 
-/* Compute slice lengths from gaps between consecutive offsets */
-static void compute_slice_lengths(rex_file_t *rex)
+/* Clamp slice lengths to decoded PCM buffer bounds */
+static void clamp_slice_lengths(rex_file_t *rex)
 {
     for (int i = 0; i < rex->slice_count; i++) {
-        if (i + 1 < rex->slice_count) {
-            /* Length = next slice offset - this slice offset */
-            uint32_t next_off = rex->slices[i + 1].sample_offset;
-            uint32_t this_off = rex->slices[i].sample_offset;
-            if (next_off > this_off) {
-                rex->slices[i].sample_length = next_off - this_off;
-            }
-        } else {
-            /* Last slice: extends to end of audio */
-            if (rex->total_sample_length > rex->slices[i].sample_offset) {
-                rex->slices[i].sample_length =
-                    rex->total_sample_length - rex->slices[i].sample_offset;
-            } else if (rex->pcm_samples > (int)rex->slices[i].sample_offset) {
-                rex->slices[i].sample_length =
-                    rex->pcm_samples - rex->slices[i].sample_offset;
+        rex_slice_t *s = &rex->slices[i];
+        if ((int)(s->sample_offset + s->sample_length) > rex->pcm_samples) {
+            if ((int)s->sample_offset >= rex->pcm_samples) {
+                s->sample_length = 0;
+            } else {
+                s->sample_length = rex->pcm_samples - s->sample_offset;
             }
         }
     }
@@ -251,25 +268,21 @@ int rex_parse(rex_file_t *rex, const uint8_t *data, size_t data_len)
     }
 
     if (rex->slice_count == 0) {
-        snprintf(rex->error, sizeof(rex->error), "No slices found in file");
-        rex_free(rex);
-        return -1;
-    }
-
-    /* Compute slice lengths from offset gaps */
-    compute_slice_lengths(rex);
-
-    /* Validate slice boundaries against decoded data */
-    for (int i = 0; i < rex->slice_count; i++) {
-        rex_slice_t *s = &rex->slices[i];
-        if ((int)(s->sample_offset + s->sample_length) > rex->pcm_samples) {
-            if ((int)s->sample_offset >= rex->pcm_samples) {
-                s->sample_length = 0;
-            } else {
-                s->sample_length = rex->pcm_samples - s->sample_offset;
-            }
+        /* All SLCE entries were transient markers (length <= 1).
+         * Fall back: treat entire decoded audio as one slice. */
+        if (rex->pcm_samples > 0) {
+            rex->slices[0].sample_offset = 0;
+            rex->slices[0].sample_length = (uint32_t)rex->pcm_samples;
+            rex->slice_count = 1;
+        } else {
+            snprintf(rex->error, sizeof(rex->error), "No slices found in file");
+            rex_free(rex);
+            return -1;
         }
     }
+
+    /* Clamp slice lengths to decoded PCM buffer bounds */
+    clamp_slice_lengths(rex);
 
     return 0;
 }

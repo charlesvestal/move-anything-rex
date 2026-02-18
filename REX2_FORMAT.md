@@ -99,15 +99,17 @@ Core audio format parameters and the total decode length.
 
 | Offset | Size | Type | Field |
 |--------|------|------|-------|
-| 0 | 1 | uint8 | Channels / version indicator |
-| 1 | 1 | uint8 | (unknown) |
+| 0 | 1 | uint8 | Channels (1 = mono, 2 = stereo) |
+| 1 | 1 | uint8 | Bit depth indicator (3 = 16-bit, 5 = 24-bit) |
 | 2 | 2 | uint16 | (unknown) |
 | 4 | 2 | uint16 | Sample rate (e.g. 0xAC44 = 44100) |
-| 6 | 4 | uint32 | Total sample length (number of samples to decode) |
+| 6 | 4 | uint32 | Total sample length in per-channel frames |
 
-The **total sample length** is the exact number of int16 samples that
-`DecompressMono` should produce from the SDAT data. This includes a leading
-warmup region of silent/near-silent samples before the first slice.
+The **total sample length** is the number of per-channel frames to decode from
+the SDAT data. For mono files, this equals the total int16 sample count. For
+stereo files, the SDAT contains interleaved L/R data producing `total × 2`
+int16 samples. This count includes a leading warmup region of silent/near-silent
+frames before the first slice.
 
 Minimum chunk data length: **10 bytes**. Falls back to 44100 Hz if sample rate
 reads as 0.
@@ -387,6 +389,47 @@ stream is exhausted, 0-bits are returned.
 
 ---
 
+## Stereo Encoding (L/Delta)
+
+Stereo REX2 files (SINF byte 0 = 2) use **L/delta encoding** in the DWOP codec.
+The left channel is encoded directly and the right channel encodes the
+difference `R - L`.
+
+### Decoding Stereo
+
+1. Initialize two **independent** channel states (each with its own `S[5]`,
+   `e[5]`, `rv`, `ba`), sharing a single bitstream reader
+2. For each frame:
+   - Decode one sample from the L channel state → `L_out`
+   - Decode one sample from the R channel state → `R_delta`
+   - Output: `L = L_out`, `R = L_out + R_delta`
+3. Output is interleaved: `[L0, R0, L1, R1, ...]`
+
+```
+br = bitreader(SDAT)
+L_state = initial_state()    // S=0, e=2560, rv=2, ba=0
+R_state = initial_state()    // independent copy
+
+for each frame:
+    L_out   = decode_one_sample(L_state, br)
+    R_delta = decode_one_sample(R_state, br)
+    output_L = L_out
+    output_R = L_out + R_delta
+```
+
+Each channel's `decode_one_sample` follows the exact same DWOP algorithm
+described above. The bit reader is shared (both channels consume bits from the
+same SDAT stream in alternating order), but all predictor/energy/range state is
+per-channel.
+
+### Slice Offsets for Stereo
+
+Slice offsets in SLCE chunks are in **per-channel frames**, not total int16
+samples. For stereo PCM data stored as interleaved L/R pairs, the PCM index for
+frame `f` is `f * 2` (L) and `f * 2 + 1` (R).
+
+---
+
 ## Worked Example
 
 For the test file `120Mono.rx2`:
@@ -422,10 +465,13 @@ First decoded samples at the audio boundary:
 
 The decoder was verified by:
 
-1. **LLDB tracing** the proprietary `DecompressMono` function in the REX Shared
-   Library framework (macOS ARM64)
-2. Capturing the complete 117,760-sample int16 output buffer from the real binary
-3. Comparing our decoder output sample-by-sample: **117,760/117,760 exact match**
+1. **LLDB tracing** the proprietary `DecompressMono` and `DecompressStereo`
+   functions in the REX Shared Library framework (macOS ARM64)
+2. Capturing the complete output buffers from the real binary
+3. Comparing our decoder output sample-by-sample:
+   - **Mono**: 117,760/117,760 exact match (`120Mono.rx2`)
+   - **Stereo**: 91,528/91,528 frames exact match (`120Stereo.rx2`)
 4. Confirming the decoder does not diverge over the full file length
-5. Round-trip testing: decode SDAT → re-encode → compare bits against original
-   SDAT (bit-perfect match for the core entropy coding)
+5. Disassembly of `DecompressStereo` confirmed the L/delta encoding scheme:
+   the function is approximately 2× the size of `DecompressMono`, with two
+   independent sets of predictor/energy registers and a shared bitstream

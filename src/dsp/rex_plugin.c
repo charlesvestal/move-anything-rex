@@ -1,9 +1,9 @@
 /*
  * REX Player DSP Plugin
  *
- * Parses .rx2/.rex files on-device, decodes DWVW-12 compressed slices,
- * and maps them across MIDI notes starting at note 36 (C2).
- * One-shot polyphonic playback with 16 voices.
+ * Parses .rx2/.rex files on-device, decodes DWOP compressed slices
+ * (mono or L/delta stereo), and maps them across MIDI notes starting
+ * at note 36 (C2). One-shot polyphonic playback with 16 voices.
  *
  * V2 API - instance-based for Signal Chain integration.
  *
@@ -611,6 +611,8 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     float gain = inst->gain;
 
     /* Mix all active voices */
+    int is_stereo = (inst->rex.pcm_channels == 2);
+
     for (int v = 0; v < MAX_VOICES; v++) {
         voice_t *voice = &inst->voices[v];
         if (!voice->active) continue;
@@ -629,18 +631,24 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                 break;
             }
 
-            /* Get sample and apply gain */
-            float sample = (float)pcm[pos] * gain;
+            /* Get sample(s) and apply gain */
+            float sample_l, sample_r;
+            if (is_stereo) {
+                sample_l = (float)pcm[pos * 2] * gain;
+                sample_r = (float)pcm[pos * 2 + 1] * gain;
+            } else {
+                sample_l = sample_r = (float)pcm[pos] * gain;
+            }
 
             /* Soft clip */
-            if (sample > 32767.0f) sample = 32767.0f;
-            if (sample < -32768.0f) sample = -32768.0f;
+            if (sample_l > 32767.0f) sample_l = 32767.0f;
+            if (sample_l < -32768.0f) sample_l = -32768.0f;
+            if (sample_r > 32767.0f) sample_r = 32767.0f;
+            if (sample_r < -32768.0f) sample_r = -32768.0f;
 
-            int16_t s = (int16_t)sample;
-
-            /* Mix into stereo output (mono source -> both channels) */
-            int32_t left = (int32_t)out_interleaved_lr[i * 2] + s;
-            int32_t right = (int32_t)out_interleaved_lr[i * 2 + 1] + s;
+            /* Mix into stereo output */
+            int32_t left = (int32_t)out_interleaved_lr[i * 2] + (int16_t)sample_l;
+            int32_t right = (int32_t)out_interleaved_lr[i * 2 + 1] + (int16_t)sample_r;
 
             /* Clamp after mixing */
             if (left > 32767) left = 32767;

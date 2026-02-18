@@ -3,7 +3,7 @@
  *
  * Parses Propellerhead ReCycle .rx2/.rex files.
  * These use an IFF-style container format (big-endian) with
- * DWVW-12 compressed audio data.
+ * DWOP compressed audio data (mono or L/delta stereo).
  *
  * License: MIT
  */
@@ -40,10 +40,10 @@ typedef struct {
     int slice_count;
     rex_slice_t slices[REX_MAX_SLICES];
 
-    /* Decoded PCM audio (from SDAT chunk, DWVW-12 decoded) */
+    /* Decoded PCM audio (from SDAT chunk, DWOP decoded) */
     int16_t *pcm_data;       /* allocated, caller must free */
-    int pcm_samples;         /* total samples in pcm_data */
-    int pcm_channels;        /* channels in pcm_data */
+    int pcm_samples;         /* total frames (per-channel sample count) */
+    int pcm_channels;        /* 1=mono, 2=stereo (interleaved L/R in pcm_data) */
 
     /* Total sound length from SINF */
     uint32_t total_sample_length;

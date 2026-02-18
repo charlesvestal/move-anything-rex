@@ -37,4 +37,13 @@ void dwop_init(dwop_state_t *state, const uint8_t *data, int data_len);
  * Returns number of samples actually decoded. */
 int dwop_decode(dwop_state_t *state, int16_t *out, int max_samples);
 
+/* Decode stereo DWOP data.
+ * Uses L/delta encoding: L channel is decoded directly, R channel encodes
+ * (R-L) difference. Decoder reconstructs: R = L_output + delta_output.
+ * Output is interleaved: out[0]=L0, out[1]=R0, out[2]=L1, out[3]=R1, ...
+ * out buffer must hold max_frames * 2 int16_t values.
+ * Returns number of frames (stereo pairs) actually decoded. */
+int dwop_decode_stereo(const uint8_t *data, int data_len,
+                       int16_t *out, int max_frames);
+
 #endif /* DWOP_H */
