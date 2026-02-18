@@ -1,0 +1,31 @@
+{
+  "id": "rex",
+  "name": "REX Player",
+  "abbrev": "RX",
+  "version": "0.1.0",
+  "description": "Propellerhead ReCycle (.rx2/.rex) slice player",
+  "author": "charlesvestal",
+  "license": "MIT",
+  "ui": "ui.js",
+  "dsp": "dsp.so",
+  "api_version": 2,
+  "capabilities": {
+    "audio_out": true,
+    "audio_in": false,
+    "midi_in": true,
+    "midi_out": false,
+    "aftertouch": false,
+    "chainable": true,
+    "component_type": "sound_generator"
+  },
+  "assets": {
+    "path": "loops",
+    "label": "REX Loops",
+    "extensions": [".rx2", ".rex", ".rcy"],
+    "description": "Upload .rx2/.rex loop files (ReCycle format)",
+    "hint": "REX files are created with Propellerhead ReCycle"
+  },
+  "defaults": {
+    "gain": 1.0
+  }
+}
