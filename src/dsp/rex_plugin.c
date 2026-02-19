@@ -16,6 +16,7 @@
 #include <strings.h>
 #include <dirent.h>
 #include <stdint.h>
+#include <math.h>
 
 #include "rex_parser.h"
 
@@ -57,6 +58,7 @@ typedef struct plugin_api_v2 {
 #define MAX_REX_FILES    512
 #define MAX_VOICES       16
 #define FIRST_NOTE       36   /* C2 - first slice mapped here */
+#define LOAD_DEBOUNCE_BLOCKS 3 /* ~9ms debounce at 128 frames/block */
 
 static const host_api_v1_t *g_host = NULL;
 
@@ -102,11 +104,84 @@ static int json_get_string(const char *json, const char *key, char *out, int out
 /* Voice engine                                                        */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* ADSR Envelope                                                       */
+/* ------------------------------------------------------------------ */
+
+#define ADSR_IDLE    0
+#define ADSR_ATTACK  1
+#define ADSR_DECAY   2
+#define ADSR_SUSTAIN 3
+#define ADSR_RELEASE 4
+
+#define ADSR_MIN_TIME 0.001f  /* minimum segment time to avoid clicks */
+
+typedef struct {
+    float value;      /* current envelope level 0.0-1.0 */
+    int stage;        /* ADSR_IDLE..ADSR_RELEASE */
+    float attack;     /* seconds */
+    float decay;      /* seconds */
+    float sustain;    /* level 0.0-1.0 */
+    float release;    /* seconds */
+} adsr_t;
+
+static void adsr_trigger(adsr_t *e) {
+    e->stage = ADSR_ATTACK;
+    /* Start from current value to avoid clicks on retrigger */
+}
+
+static void adsr_release(adsr_t *e) {
+    if (e->stage != ADSR_IDLE) {
+        e->stage = ADSR_RELEASE;
+    }
+}
+
+static float adsr_process(adsr_t *e, float sample_rate) {
+    float rate;
+    switch (e->stage) {
+        case ADSR_ATTACK:
+            rate = (e->attack > ADSR_MIN_TIME) ? e->attack : ADSR_MIN_TIME;
+            e->value += 1.0f / (rate * sample_rate);
+            if (e->value >= 1.0f) {
+                e->value = 1.0f;
+                e->stage = ADSR_DECAY;
+            }
+            break;
+        case ADSR_DECAY:
+            rate = (e->decay > ADSR_MIN_TIME) ? e->decay : ADSR_MIN_TIME;
+            e->value -= (1.0f - e->sustain) / (rate * sample_rate);
+            if (e->value <= e->sustain) {
+                e->value = e->sustain;
+                e->stage = ADSR_SUSTAIN;
+            }
+            break;
+        case ADSR_SUSTAIN:
+            e->value = e->sustain;
+            break;
+        case ADSR_RELEASE:
+            rate = (e->release > ADSR_MIN_TIME) ? e->release : ADSR_MIN_TIME;
+            e->value -= e->value / (rate * sample_rate);
+            if (e->value < 0.0001f) {
+                e->value = 0.0f;
+                e->stage = ADSR_IDLE;
+            }
+            break;
+        default: /* ADSR_IDLE */
+            e->value = 0.0f;
+            break;
+    }
+    return e->value;
+}
+
 typedef struct {
     int active;
     int slice_index;
-    int position;       /* current playback position in slice (samples) */
+    float position;     /* current playback position in slice (fractional samples) */
     uint32_t age;       /* for voice stealing (oldest first) */
+    uint8_t note;       /* MIDI note that triggered this voice */
+    uint8_t velocity;   /* 0-127, for velocity scaling */
+    int gate;           /* 1 = key held, 0 = key released */
+    adsr_t env;         /* amplitude envelope */
 } voice_t;
 
 /* ------------------------------------------------------------------ */
@@ -139,6 +214,20 @@ typedef struct {
 
     /* Parameters */
     float gain;
+    int start_note;     /* MIDI note for first slice (default 36 = C2) */
+
+    /* Envelope parameters */
+    float attack;       /* 0.0 - 2.0 seconds */
+    float decay;        /* 0.0 - 2.0 seconds */
+    float sustain;      /* 0.0 - 1.0 level */
+    float release;      /* 0.0 - 2.0 seconds */
+    int mode;           /* 0 = trigger (one-shot), 1 = gate */
+    int choke;          /* 0 = off (polyphonic), 1 = on (monophonic choke) */
+    int transpose;      /* -12 to +12 semitones, default 0 */
+
+    /* Deferred file loading (debounce for scrolling) */
+    int deferred_file_index;      /* file index waiting for debounce */
+    int deferred_load_countdown;  /* render blocks remaining before loading */
 
     /* Module info */
     char module_dir[512];
@@ -290,8 +379,18 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
 
     strncpy(inst->module_dir, module_dir, sizeof(inst->module_dir) - 1);
     inst->gain = 1.0f;
+    inst->start_note = FIRST_NOTE;
     inst->file_index = 0;
     strcpy(inst->file_name, "No REX loaded");
+
+    /* Envelope defaults: transparent (instant attack, full sustain, no release) */
+    inst->attack = 0.0f;
+    inst->decay = 0.0f;
+    inst->sustain = 1.0f;
+    inst->release = 0.0f;
+    inst->mode = 0;   /* trigger (one-shot) */
+    inst->choke = 0;  /* off (polyphonic) */
+    inst->transpose = 0;
 
     /* Scan for REX files */
     char rex_dir[512];
@@ -322,6 +421,47 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
             inst->gain = f;
             if (inst->gain < 0.0f) inst->gain = 0.0f;
             if (inst->gain > 2.0f) inst->gain = 2.0f;
+        }
+        if (json_get_number(json_defaults, "start_note", &f) == 0) {
+            inst->start_note = (int)f;
+            if (inst->start_note < 0) inst->start_note = 0;
+            if (inst->start_note > 127) inst->start_note = 127;
+        }
+        if (json_get_number(json_defaults, "attack", &f) == 0) {
+            inst->attack = f;
+            if (inst->attack < 0.0f) inst->attack = 0.0f;
+            if (inst->attack > 2.0f) inst->attack = 2.0f;
+        }
+        if (json_get_number(json_defaults, "decay", &f) == 0) {
+            inst->decay = f;
+            if (inst->decay < 0.0f) inst->decay = 0.0f;
+            if (inst->decay > 2.0f) inst->decay = 2.0f;
+        }
+        if (json_get_number(json_defaults, "sustain", &f) == 0) {
+            inst->sustain = f;
+            if (inst->sustain < 0.0f) inst->sustain = 0.0f;
+            if (inst->sustain > 1.0f) inst->sustain = 1.0f;
+        }
+        if (json_get_number(json_defaults, "release", &f) == 0) {
+            inst->release = f;
+            if (inst->release < 0.0f) inst->release = 0.0f;
+            if (inst->release > 2.0f) inst->release = 2.0f;
+        }
+        if (json_get_number(json_defaults, "transpose", &f) == 0) {
+            inst->transpose = (int)f;
+            if (inst->transpose < -12) inst->transpose = -12;
+            if (inst->transpose > 12) inst->transpose = 12;
+        }
+        {
+            char str[16];
+            if (json_get_string(json_defaults, "mode", str, sizeof(str)) > 0) {
+                if (strcmp(str, "trigger") == 0) inst->mode = 0;
+                else if (strcmp(str, "gate") == 0) inst->mode = 1;
+            }
+            if (json_get_string(json_defaults, "choke", str, sizeof(str)) > 0) {
+                if (strcmp(str, "off") == 0) inst->choke = 0;
+                else if (strcmp(str, "on") == 0) inst->choke = 1;
+            }
         }
     }
 
@@ -366,12 +506,19 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source)
 
     if (status == 0x90 && velocity > 0) {
         /* Note On - trigger slice */
-        int slice_index = (int)note - FIRST_NOTE;
+        int slice_index = (int)note - inst->start_note;
         if (slice_index < 0 || slice_index >= inst->rex.slice_count) return;
 
         /* Check slice has audio */
         rex_slice_t *slice = &inst->rex.slices[slice_index];
         if (slice->sample_length == 0) return;
+
+        /* Choke: silence all other active voices */
+        if (inst->choke) {
+            for (int i = 0; i < MAX_VOICES; i++) {
+                inst->voices[i].active = 0;
+            }
+        }
 
         /* Find a free voice, or steal the oldest */
         int best = -1;
@@ -395,6 +542,31 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source)
         v->slice_index = slice_index;
         v->position = 0;
         v->age = ++inst->voice_counter;
+        v->note = note;
+        v->velocity = velocity;
+        v->gate = 1;
+
+        /* Initialize and trigger envelope */
+        v->env.attack = inst->attack;
+        v->env.decay = inst->decay;
+        v->env.sustain = inst->sustain;
+        v->env.release = inst->release;
+        v->env.value = 0.0f;
+        adsr_trigger(&v->env);
+    }
+    else if ((status == 0x80) || (status == 0x90 && velocity == 0)) {
+        /* Note Off - release matching voices */
+        for (int i = 0; i < MAX_VOICES; i++) {
+            voice_t *v = &inst->voices[i];
+            if (v->active && v->note == note && v->gate) {
+                v->gate = 0;
+                if (inst->mode == 1) {
+                    /* Gate mode: enter release stage */
+                    adsr_release(&v->env);
+                }
+                /* Trigger mode: do nothing, let slice play out */
+            }
+        }
     }
     else if (status == 0xB0) {
         /* Control Change */
@@ -419,26 +591,75 @@ static void v2_set_param(void *instance, const char *key, const char *val)
     if (strcmp(key, "preset") == 0 || strcmp(key, "file_index") == 0) {
         int idx = atoi(val);
         if (idx >= 0 && idx < inst->file_count && idx != inst->file_index) {
+            /* Update index and display name immediately for responsive UI */
             inst->file_index = idx;
-            load_rex_file(inst, inst->files[idx].path);
+            strncpy(inst->file_name, inst->files[idx].name, sizeof(inst->file_name) - 1);
+            inst->file_name[sizeof(inst->file_name) - 1] = '\0';
+            /* Defer actual file load (debounce for fast scrolling) */
+            inst->deferred_file_index = idx;
+            inst->deferred_load_countdown = LOAD_DEBOUNCE_BLOCKS;
         }
     }
     else if (strcmp(key, "next_file") == 0 || strcmp(key, "next_preset") == 0) {
         if (inst->file_count > 0) {
             inst->file_index = (inst->file_index + 1) % inst->file_count;
-            load_rex_file(inst, inst->files[inst->file_index].path);
+            strncpy(inst->file_name, inst->files[inst->file_index].name, sizeof(inst->file_name) - 1);
+            inst->file_name[sizeof(inst->file_name) - 1] = '\0';
+            inst->deferred_file_index = inst->file_index;
+            inst->deferred_load_countdown = LOAD_DEBOUNCE_BLOCKS;
         }
     }
     else if (strcmp(key, "prev_file") == 0 || strcmp(key, "prev_preset") == 0) {
         if (inst->file_count > 0) {
             inst->file_index = (inst->file_index - 1 + inst->file_count) % inst->file_count;
-            load_rex_file(inst, inst->files[inst->file_index].path);
+            strncpy(inst->file_name, inst->files[inst->file_index].name, sizeof(inst->file_name) - 1);
+            inst->file_name[sizeof(inst->file_name) - 1] = '\0';
+            inst->deferred_file_index = inst->file_index;
+            inst->deferred_load_countdown = LOAD_DEBOUNCE_BLOCKS;
         }
     }
     else if (strcmp(key, "gain") == 0) {
         inst->gain = (float)atof(val);
         if (inst->gain < 0.0f) inst->gain = 0.0f;
         if (inst->gain > 2.0f) inst->gain = 2.0f;
+    }
+    else if (strcmp(key, "start_note") == 0) {
+        inst->start_note = atoi(val);
+        if (inst->start_note < 0) inst->start_note = 0;
+        if (inst->start_note > 127) inst->start_note = 127;
+    }
+    else if (strcmp(key, "attack") == 0) {
+        inst->attack = (float)atof(val);
+        if (inst->attack < 0.0f) inst->attack = 0.0f;
+        if (inst->attack > 2.0f) inst->attack = 2.0f;
+    }
+    else if (strcmp(key, "decay") == 0) {
+        inst->decay = (float)atof(val);
+        if (inst->decay < 0.0f) inst->decay = 0.0f;
+        if (inst->decay > 2.0f) inst->decay = 2.0f;
+    }
+    else if (strcmp(key, "sustain") == 0) {
+        inst->sustain = (float)atof(val);
+        if (inst->sustain < 0.0f) inst->sustain = 0.0f;
+        if (inst->sustain > 1.0f) inst->sustain = 1.0f;
+    }
+    else if (strcmp(key, "release") == 0) {
+        inst->release = (float)atof(val);
+        if (inst->release < 0.0f) inst->release = 0.0f;
+        if (inst->release > 2.0f) inst->release = 2.0f;
+    }
+    else if (strcmp(key, "mode") == 0) {
+        if (strcmp(val, "trigger") == 0) inst->mode = 0;
+        else if (strcmp(val, "gate") == 0) inst->mode = 1;
+    }
+    else if (strcmp(key, "choke") == 0) {
+        if (strcmp(val, "off") == 0) inst->choke = 0;
+        else if (strcmp(val, "on") == 0) inst->choke = 1;
+    }
+    else if (strcmp(key, "transpose") == 0) {
+        inst->transpose = atoi(val);
+        if (inst->transpose < -12) inst->transpose = -12;
+        if (inst->transpose > 12) inst->transpose = 12;
     }
     else if (strcmp(key, "all_notes_off") == 0 || strcmp(key, "panic") == 0) {
         for (int i = 0; i < MAX_VOICES; i++) {
@@ -455,7 +676,10 @@ static void v2_set_param(void *instance, const char *key, const char *val)
                 if (strcmp(inst->files[i].name, name) == 0) {
                     if (i != inst->file_index) {
                         inst->file_index = i;
-                        load_rex_file(inst, inst->files[i].path);
+                        strncpy(inst->file_name, inst->files[i].name, sizeof(inst->file_name) - 1);
+                        inst->file_name[sizeof(inst->file_name) - 1] = '\0';
+                        inst->deferred_file_index = i;
+                        inst->deferred_load_countdown = LOAD_DEBOUNCE_BLOCKS;
                     }
                     break;
                 }
@@ -464,7 +688,10 @@ static void v2_set_param(void *instance, const char *key, const char *val)
             int idx = (int)f;
             if (idx >= 0 && idx < inst->file_count && idx != inst->file_index) {
                 inst->file_index = idx;
-                load_rex_file(inst, inst->files[idx].path);
+                strncpy(inst->file_name, inst->files[idx].name, sizeof(inst->file_name) - 1);
+                inst->file_name[sizeof(inst->file_name) - 1] = '\0';
+                inst->deferred_file_index = idx;
+                inst->deferred_load_countdown = LOAD_DEBOUNCE_BLOCKS;
             }
         }
 
@@ -472,6 +699,47 @@ static void v2_set_param(void *instance, const char *key, const char *val)
             inst->gain = f;
             if (inst->gain < 0.0f) inst->gain = 0.0f;
             if (inst->gain > 2.0f) inst->gain = 2.0f;
+        }
+        if (json_get_number(val, "start_note", &f) == 0) {
+            inst->start_note = (int)f;
+            if (inst->start_note < 0) inst->start_note = 0;
+            if (inst->start_note > 127) inst->start_note = 127;
+        }
+        if (json_get_number(val, "attack", &f) == 0) {
+            inst->attack = f;
+            if (inst->attack < 0.0f) inst->attack = 0.0f;
+            if (inst->attack > 2.0f) inst->attack = 2.0f;
+        }
+        if (json_get_number(val, "decay", &f) == 0) {
+            inst->decay = f;
+            if (inst->decay < 0.0f) inst->decay = 0.0f;
+            if (inst->decay > 2.0f) inst->decay = 2.0f;
+        }
+        if (json_get_number(val, "sustain", &f) == 0) {
+            inst->sustain = f;
+            if (inst->sustain < 0.0f) inst->sustain = 0.0f;
+            if (inst->sustain > 1.0f) inst->sustain = 1.0f;
+        }
+        if (json_get_number(val, "release", &f) == 0) {
+            inst->release = f;
+            if (inst->release < 0.0f) inst->release = 0.0f;
+            if (inst->release > 2.0f) inst->release = 2.0f;
+        }
+        if (json_get_number(val, "transpose", &f) == 0) {
+            inst->transpose = (int)f;
+            if (inst->transpose < -12) inst->transpose = -12;
+            if (inst->transpose > 12) inst->transpose = 12;
+        }
+        {
+            char str[16];
+            if (json_get_string(val, "mode", str, sizeof(str)) > 0) {
+                if (strcmp(str, "trigger") == 0) inst->mode = 0;
+                else if (strcmp(str, "gate") == 0) inst->mode = 1;
+            }
+            if (json_get_string(val, "choke", str, sizeof(str)) > 0) {
+                if (strcmp(str, "off") == 0) inst->choke = 0;
+                else if (strcmp(str, "on") == 0) inst->choke = 1;
+            }
         }
     }
 }
@@ -511,6 +779,30 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     else if (strcmp(key, "gain") == 0) {
         return snprintf(buf, buf_len, "%.2f", inst->gain);
     }
+    else if (strcmp(key, "start_note") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->start_note);
+    }
+    else if (strcmp(key, "attack") == 0) {
+        return snprintf(buf, buf_len, "%.3f", inst->attack);
+    }
+    else if (strcmp(key, "decay") == 0) {
+        return snprintf(buf, buf_len, "%.3f", inst->decay);
+    }
+    else if (strcmp(key, "sustain") == 0) {
+        return snprintf(buf, buf_len, "%.3f", inst->sustain);
+    }
+    else if (strcmp(key, "release") == 0) {
+        return snprintf(buf, buf_len, "%.3f", inst->release);
+    }
+    else if (strcmp(key, "mode") == 0) {
+        return snprintf(buf, buf_len, "%s", inst->mode ? "gate" : "trigger");
+    }
+    else if (strcmp(key, "choke") == 0) {
+        return snprintf(buf, buf_len, "%s", inst->choke ? "on" : "off");
+    }
+    else if (strcmp(key, "transpose") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->transpose);
+    }
     else if (strcmp(key, "bank_name") == 0) {
         /* For chain compatibility: bank = folder */
         strncpy(buf, "REX Loops", buf_len - 1);
@@ -525,8 +817,13 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
     else if (strcmp(key, "state") == 0) {
         return snprintf(buf, buf_len,
-            "{\"file_name\":\"%s\",\"file_index\":%d,\"gain\":%.2f}",
-            inst->file_name, inst->file_index, inst->gain);
+            "{\"file_name\":\"%s\",\"file_index\":%d,\"gain\":%.2f,\"start_note\":%d,"
+            "\"attack\":%.3f,\"decay\":%.3f,\"sustain\":%.3f,\"release\":%.3f,"
+            "\"mode\":\"%s\",\"choke\":\"%s\",\"transpose\":%d}",
+            inst->file_name, inst->file_index, inst->gain, inst->start_note,
+            inst->attack, inst->decay, inst->sustain, inst->release,
+            inst->mode ? "gate" : "trigger", inst->choke ? "on" : "off",
+            inst->transpose);
     }
     else if (strcmp(key, "ui_hierarchy") == 0) {
         const char *hierarchy =
@@ -539,9 +836,17 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                         "\"count_param\":\"preset_count\","
                         "\"name_param\":\"preset_name\","
                         "\"children\":null,"
-                        "\"knobs\":[\"gain\"],"
+                        "\"knobs\":[\"gain\",\"start_note\",\"transpose\",\"attack\",\"decay\",\"sustain\",\"release\",\"mode\",\"choke\"],"
                         "\"params\":["
-                            "{\"key\":\"gain\",\"label\":\"Gain\"}"
+                            "{\"key\":\"gain\",\"label\":\"Gain\"},"
+                            "{\"key\":\"start_note\",\"label\":\"Start Note\"},"
+                            "{\"key\":\"transpose\",\"label\":\"Transpose\"},"
+                            "{\"key\":\"attack\",\"label\":\"Attack\"},"
+                            "{\"key\":\"decay\",\"label\":\"Decay\"},"
+                            "{\"key\":\"sustain\",\"label\":\"Sustain\"},"
+                            "{\"key\":\"release\",\"label\":\"Release\"},"
+                            "{\"key\":\"mode\",\"label\":\"Mode\"},"
+                            "{\"key\":\"choke\",\"label\":\"Choke\"}"
                         "]"
                     "}"
                 "}"
@@ -557,7 +862,15 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         const char *params =
             "["
                 "{\"key\":\"preset\",\"name\":\"File\",\"type\":\"int\",\"min\":0,\"max\":9999},"
-                "{\"key\":\"gain\",\"name\":\"Gain\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01}"
+                "{\"key\":\"gain\",\"name\":\"Gain\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
+                "{\"key\":\"start_note\",\"name\":\"Start Note\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},"
+                "{\"key\":\"attack\",\"name\":\"Attack\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.001},"
+                "{\"key\":\"decay\",\"name\":\"Decay\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.001},"
+                "{\"key\":\"sustain\",\"name\":\"Sustain\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+                "{\"key\":\"release\",\"name\":\"Release\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.001},"
+                "{\"key\":\"mode\",\"name\":\"Mode\",\"type\":\"enum\",\"options\":[\"trigger\",\"gate\"]},"
+                "{\"key\":\"choke\",\"name\":\"Choke\",\"type\":\"enum\",\"options\":[\"off\",\"on\"]},"
+                "{\"key\":\"transpose\",\"name\":\"Transpose\",\"type\":\"int\",\"min\":-12,\"max\":12,\"step\":1}"
             "]";
         int len = strlen(params);
         if (len < buf_len) {
@@ -602,12 +915,21 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 {
     rex_instance_t *inst = (rex_instance_t *)instance;
 
+    /* Handle deferred file load (debounce for scrolling) */
+    if (inst && inst->deferred_load_countdown > 0) {
+        inst->deferred_load_countdown--;
+        if (inst->deferred_load_countdown == 0) {
+            load_rex_file(inst, inst->files[inst->deferred_file_index].path);
+        }
+    }
+
     /* Clear output */
     memset(out_interleaved_lr, 0, frames * 2 * sizeof(int16_t));
 
     if (!inst || !inst->rex_loaded || !inst->rex.pcm_data) return;
 
     float gain = inst->gain;
+    float rate = powf(2.0f, inst->transpose / 12.0f);
 
     /* Mix all active voices */
     int is_stereo = (inst->rex.pcm_channels == 2);
@@ -620,23 +942,51 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         const int16_t *pcm = inst->rex.pcm_data;
         int slice_start = (int)slice->sample_offset;
         int slice_end = slice_start + (int)slice->sample_length;
+        int pcm_limit = inst->rex.pcm_samples;
+        float vel_scale = voice->velocity / 127.0f;
+        int slice_done = 0;
 
         for (int i = 0; i < frames; i++) {
-            int pos = slice_start + voice->position;
+            /* Process envelope */
+            float env_val = adsr_process(&voice->env, (float)MOVE_SAMPLE_RATE);
 
-            if (pos >= slice_end || pos >= inst->rex.pcm_samples) {
-                /* Slice finished (one-shot) */
+            /* Check if envelope has finished (release complete) */
+            if (voice->env.stage == ADSR_IDLE) {
                 voice->active = 0;
                 break;
             }
 
-            /* Get sample(s) and apply gain */
+            int ipos = (int)voice->position;
+            int pos = slice_start + ipos;
+
+            if (!slice_done && (pos >= slice_end || pos >= pcm_limit)) {
+                /* Slice audio finished - force envelope into release */
+                slice_done = 1;
+                adsr_release(&voice->env);
+            }
+
             float sample_l, sample_r;
-            if (is_stereo) {
-                sample_l = (float)pcm[pos * 2] * gain;
-                sample_r = (float)pcm[pos * 2 + 1] * gain;
+            if (slice_done) {
+                /* No more audio data - envelope is releasing to zero */
+                sample_l = sample_r = 0.0f;
             } else {
-                sample_l = sample_r = (float)pcm[pos] * gain;
+                float frac = voice->position - (float)ipos;
+                int pos1 = pos + 1;
+                int pos1_valid = (pos1 < slice_end && pos1 < pcm_limit);
+
+                if (is_stereo) {
+                    float s0_l = (float)pcm[pos * 2];
+                    float s0_r = (float)pcm[pos * 2 + 1];
+                    float s1_l = pos1_valid ? (float)pcm[pos1 * 2] : s0_l;
+                    float s1_r = pos1_valid ? (float)pcm[pos1 * 2 + 1] : s0_r;
+                    sample_l = (s0_l + frac * (s1_l - s0_l)) * gain * env_val * vel_scale;
+                    sample_r = (s0_r + frac * (s1_r - s0_r)) * gain * env_val * vel_scale;
+                } else {
+                    float s0 = (float)pcm[pos];
+                    float s1 = pos1_valid ? (float)pcm[pos1] : s0;
+                    sample_l = sample_r = (s0 + frac * (s1 - s0)) * gain * env_val * vel_scale;
+                }
+                voice->position += rate;
             }
 
             /* Soft clip */
@@ -657,8 +1007,6 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
 
             out_interleaved_lr[i * 2] = (int16_t)left;
             out_interleaved_lr[i * 2 + 1] = (int16_t)right;
-
-            voice->position++;
         }
     }
 }

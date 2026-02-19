@@ -2,7 +2,7 @@
   "id": "rex",
   "name": "REX Player",
   "abbrev": "RX",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Propellerhead ReCycle (.rx2/.rex) slice player",
   "author": "charlesvestal",
   "license": "MIT",
@@ -26,6 +26,14 @@
     "hint": "REX files are created with Propellerhead ReCycle"
   },
   "defaults": {
-    "gain": 1.0
+    "gain": 1.0,
+    "start_note": 36,
+    "attack": 0.0,
+    "decay": 0.0,
+    "sustain": 1.0,
+    "release": 0.0,
+    "mode": "trigger",
+    "choke": "off",
+    "transpose": 0
   }
 }
