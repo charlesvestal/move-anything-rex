@@ -473,17 +473,32 @@ First decoded samples at the audio boundary:
 
 ---
 
+## Implementation Methodology
+
+This is an independent, clean-room implementation. No Reason Studios source code
+was used or referenced. The implementation was derived entirely from:
+
+1. **Binary analysis** of `.rx2` files — inspecting the IFF container structure,
+   chunk tags, and compressed bitstream data directly
+2. **Black-box testing** — feeding known inputs through the reference decoder and
+   observing outputs to infer the algorithm's behavior
+3. **Disassembly of the public macOS framework** — examining the compiled ARM64
+   machine code of `DecompressMono` and `DecompressStereo` in the REX Shared
+   Library to confirm algorithmic details (predictor mapping, range coder
+   parameters, stereo L/delta scheme)
+
+No proprietary source code, header files, or SDK libraries are included in or
+linked by this implementation. The REX2 file format is a creation of
+Propellerhead Software (now Reason Studios AB). ReCycle is a trademark of Reason
+Studios AB.
+
 ## Verification
 
 The decoder was verified by:
 
-1. **LLDB tracing** the proprietary `DecompressMono` and `DecompressStereo`
-   functions in the REX Shared Library framework (macOS ARM64)
-2. Capturing the complete output buffers from the real binary
-3. Comparing our decoder output sample-by-sample:
+1. **LLDB tracing** the `DecompressMono` and `DecompressStereo` functions in the
+   REX Shared Library framework (macOS ARM64) to capture reference output buffers
+2. Comparing our independently-written decoder output sample-by-sample:
    - **Mono**: 117,760/117,760 exact match (`120Mono.rx2`)
    - **Stereo**: 91,528/91,528 frames exact match (`120Stereo.rx2`)
-4. Confirming the decoder does not diverge over the full file length
-5. Disassembly of `DecompressStereo` confirmed the L/delta encoding scheme:
-   the function is approximately 2× the size of `DecompressMono`, with two
-   independent sets of predictor/energy registers and a shared bitstream
+3. Confirming the decoder does not diverge over the full file length
