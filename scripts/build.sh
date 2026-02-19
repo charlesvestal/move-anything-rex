@@ -69,7 +69,8 @@ ${CROSS_PREFIX}gcc -O3 -shared -fPIC \
     build/dwop.o \
     build/rex_parser.o \
     -o build/dsp.so \
-    -Isrc/dsp
+    -Isrc/dsp \
+    -lm
 
 # Copy files to dist (use cat to avoid ExtFS deallocation issues with Docker)
 echo "Packaging..."
