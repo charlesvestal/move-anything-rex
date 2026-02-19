@@ -20,6 +20,12 @@ Upload `.rx2` files through the Move Everything file manager, or copy them direc
 /data/UserData/move-anything/modules/sound_generators/rex/loops/
 ```
 
+## Format Attribution
+
+The REX2 file format (`.rx2`, `.rex`, `.rcy`) is a proprietary format created by Propellerhead Software (now [Reason Studios](https://www.reasonstudios.com/)). ReCycle is a trademark of Reason Studios AB.
+
+This module is an independent, clean-room implementation. It does not contain any Reason Studios code. The file format and DWOP codec were reverse-engineered for interoperability by analyzing the binary structure of REX2 files. See [REX2_FORMAT.md](REX2_FORMAT.md) for the full specification and methodology.
+
 ## License
 
 [MIT](LICENSE)
