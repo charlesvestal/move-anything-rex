@@ -1,0 +1,113 @@
+{
+  "title": "REX Player",
+  "children": [
+    {
+      "title": "Overview",
+      "lines": [
+        "ReCycle loop slice",
+        "player for .rx2 and",
+        ".rex files.",
+        "",
+        "Each slice maps to",
+        "a MIDI note starting",
+        "at a configurable",
+        "start note (C2).",
+        "",
+        "16-voice polyphonic",
+        "with per-slice ADSR",
+        "envelope.",
+        "",
+        "Supports mono and",
+        "stereo REX files."
+      ]
+    },
+    {
+      "title": "Setup",
+      "lines": [
+        "Upload .rx2 or .rex",
+        "files using the ME",
+        "Installer's asset",
+        "copy feature.",
+        "",
+        "Files go to the",
+        "loops/ folder.",
+        "",
+        "New files are auto-",
+        "detected when you",
+        "browse the file list."
+      ]
+    },
+    {
+      "title": "Controls",
+      "children": [
+        {
+          "title": "Knob Mapping",
+          "lines": [
+            "Knob 1: Gain",
+            " Output level 0-2x",
+            "",
+            "Knob 2: Start Note",
+            " First slice note",
+            " (default C2 = 36)",
+            "",
+            "Knob 3: Transpose",
+            " -12 to +12 semi",
+            " Pitch-shifts all",
+            " slices",
+            "",
+            "Knob 4: Attack",
+            "Knob 5: Decay",
+            "Knob 6: Sustain",
+            "Knob 7: Release",
+            " Per-slice ADSR",
+            " (0-2 seconds each)"
+          ]
+        },
+        {
+          "title": "Playback Modes",
+          "lines": [
+            "Mode:",
+            " Trigger: one-shot",
+            "  Slice plays to end",
+            "  Note-off ignored.",
+            "",
+            " Gate: envelope-",
+            "  driven. Slice",
+            "  sustains until",
+            "  note-off triggers",
+            "  release.",
+            "",
+            "Choke:",
+            " Off: polyphonic",
+            "  Multiple slices",
+            "  play at once.",
+            "",
+            " On: monophonic",
+            "  New note silences",
+            "  all previous."
+          ]
+        }
+      ]
+    },
+    {
+      "title": "MIDI",
+      "lines": [
+        "16-voice polyphony",
+        "with voice stealing.",
+        "",
+        "Each slice maps to",
+        "consecutive notes",
+        "from Start Note.",
+        "",
+        "Example: 12 slices",
+        "at C2 = notes 36-47",
+        "(C2 through B2).",
+        "",
+        "Velocity controls",
+        "per-slice volume.",
+        "",
+        "CC 123: All Notes Off"
+      ]
+    }
+  ]
+}
