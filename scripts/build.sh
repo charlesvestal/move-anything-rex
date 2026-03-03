@@ -61,6 +61,26 @@ ${CROSS_PREFIX}gcc -O3 -fPIC \
     -c src/dsp/rex_parser.c -o build/rex_parser.o \
     -Isrc/dsp
 
+echo "Compiling DWOP encoder..."
+${CROSS_PREFIX}gcc -O3 -fPIC \
+    -march=armv8-a -mtune=cortex-a72 \
+    -DNDEBUG \
+    -c src/dsp/dwop_encode.c -o build/dwop_encode.o
+
+echo "Compiling WAV reader..."
+${CROSS_PREFIX}gcc -O3 -fPIC \
+    -march=armv8-a -mtune=cortex-a72 \
+    -DNDEBUG \
+    -c src/dsp/wav_reader.c -o build/wav_reader.o \
+    -Isrc/dsp
+
+echo "Compiling REX writer..."
+${CROSS_PREFIX}gcc -O3 -fPIC \
+    -march=armv8-a -mtune=cortex-a72 \
+    -DNDEBUG \
+    -c src/dsp/rex_writer.c -o build/rex_writer.o \
+    -Isrc/dsp
+
 echo "Compiling REX plugin..."
 ${CROSS_PREFIX}gcc -O3 -shared -fPIC \
     -march=armv8-a -mtune=cortex-a72 \
@@ -72,6 +92,20 @@ ${CROSS_PREFIX}gcc -O3 -shared -fPIC \
     -Isrc/dsp \
     -lm
 
+echo "Compiling rex-encode CLI..."
+${CROSS_PREFIX}gcc -O3 \
+    -march=armv8-a -mtune=cortex-a72 \
+    -DNDEBUG \
+    src/dsp/rex_encode_main.c \
+    build/dwop_encode.o \
+    build/dwop.o \
+    build/wav_reader.o \
+    build/rex_writer.o \
+    build/rex_parser.o \
+    -o build/rex-encode \
+    -Isrc/dsp \
+    -lm
+
 # Copy files to dist (use cat to avoid ExtFS deallocation issues with Docker)
 echo "Packaging..."
 cat src/module.json > dist/rex/module.json
@@ -79,6 +113,8 @@ cat src/module.json > dist/rex/module.json
 cat src/ui.js > dist/rex/ui.js
 cat build/dsp.so > dist/rex/dsp.so
 chmod +x dist/rex/dsp.so
+cat build/rex-encode > dist/rex/rex-encode
+chmod +x dist/rex/rex-encode
 
 # Create loops directory for user-supplied REX files
 mkdir -p dist/rex/loops

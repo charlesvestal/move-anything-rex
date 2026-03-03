@@ -25,7 +25,7 @@ ssh ableton@move.local "mkdir -p /data/UserData/move-anything/modules/sound_gene
 
 # Set permissions so Module Store can update later
 echo "Setting permissions..."
-ssh ableton@move.local "chmod -R a+rw /data/UserData/move-anything/modules/sound_generators/rex"
+ssh ableton@move.local "chmod -R a+rw /data/UserData/move-anything/modules/sound_generators/rex && chmod +x /data/UserData/move-anything/modules/sound_generators/rex/rex-encode"
 
 echo ""
 echo "=== Install Complete ==="
