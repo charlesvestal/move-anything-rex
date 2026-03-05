@@ -2,7 +2,7 @@
   "id": "rex",
   "name": "REX Player",
   "abbrev": "RX",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Propellerhead ReCycle (.rx2/.rex) slice player",
   "author": "charlesvestal",
   "license": "MIT",
