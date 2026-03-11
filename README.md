@@ -6,7 +6,7 @@ Supports mono and stereo `.rx2` files. Older `.rex` and `.rcy` formats are not s
 
 ## Installation
 
-Install via the Module Store in Move Everything, or download the latest release from the [releases page](https://github.com/charlesvestal/move-anything-rex/releases) and copy the `rex/` folder to your Move:
+Install via the Module Store in Move Everything, or download the latest release from the [releases page](https://github.com/charlesvestal/move-everything-rex/releases) and copy the `rex/` folder to your Move:
 
 ```
 /data/UserData/move-anything/modules/sound_generators/rex/
