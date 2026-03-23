@@ -63,6 +63,10 @@ static int parse_boundaries(const char *str, uint32_t *out, int max_count)
         char *end;
         long val = strtol(p, &end, 10);
         if (end == p) break;
+        if (val < 0) {
+            fprintf(stderr, "Error: negative boundary value %ld\n", val);
+            return -1;
+        }
         out[count++] = (uint32_t)val;
         if (*end == ',') end++;
         p = end;
@@ -92,6 +96,7 @@ int main(int argc, char **argv)
     /* Parse boundaries */
     uint32_t boundaries[MAX_SLICES + 1];
     int num_boundaries = parse_boundaries(boundaries_str, boundaries, MAX_SLICES + 1);
+    if (num_boundaries < 0) return 1;  /* parse error (e.g. negative value) */
     int num_slices = num_boundaries - 1;
 
     if (num_slices < 1) {
@@ -119,8 +124,14 @@ int main(int argc, char **argv)
     rex_write_slice_t slices[MAX_SLICES];
     for (int i = 0; i < num_slices; i++) {
         slices[i].sample_offset = boundaries[i];
+        if (boundaries[i + 1] <= boundaries[i]) {
+            fprintf(stderr, "Error: slice %d has zero or negative length (boundaries %u to %u)\n",
+                    i, boundaries[i], boundaries[i + 1]);
+            wav_free(&wav);
+            return 1;
+        }
         slices[i].sample_length = boundaries[i + 1] - boundaries[i];
-        if ((int)(slices[i].sample_offset + slices[i].sample_length) > wav.num_frames) {
+        if (slices[i].sample_offset + slices[i].sample_length > (uint32_t)wav.num_frames) {
             fprintf(stderr, "Error: slice %d extends past end of audio (%u+%u > %d)\n",
                     i, slices[i].sample_offset, slices[i].sample_length, wav.num_frames);
             wav_free(&wav);
