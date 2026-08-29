@@ -860,7 +860,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                         "\"knobs\":[\"gain\",\"start_note\",\"transpose\",\"attack\",\"decay\",\"sustain\",\"release\",\"mode\",\"choke\"],"
                         "\"params\":["
                             "{\"key\":\"gain\",\"label\":\"Gain\"},"
-                            "{\"key\":\"start_note\",\"label\":\"Start Note\"},"
+                            "{\"key\":\"start_note\",\"short_name\":\"Note\",\"label\":\"Start Note\"},"
                             "{\"key\":\"transpose\",\"label\":\"Transpose\"},"
                             "{\"key\":\"attack\",\"label\":\"Attack\"},"
                             "{\"key\":\"decay\",\"label\":\"Decay\"},"
