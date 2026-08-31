@@ -24,13 +24,12 @@
     {
       "title": "Setup",
       "lines": [
-        "Upload .rx2 or .rex",
-        "files using the ME",
-        "Installer's asset",
-        "copy feature.",
-        "",
-        "Files go to the",
-        "loops/ folder.",
+        "Copy .rx2 or .rex",
+        "files into the",
+        "module's loops/",
+        "folder using the",
+        "Schwung manager at",
+        "move.local:7700.",
         "",
         "New files are auto-",
         "detected when you",
@@ -55,12 +54,18 @@
             " Pitch-shifts all",
             " slices",
             "",
-            "Knob 4: Attack",
-            "Knob 5: Decay",
+            "Per-slice envelope:",
+            "Knob 4: Attack 0-2s",
+            "Knob 5: Decay 0-2s",
             "Knob 6: Sustain",
+            " 0-1 level, not a",
+            " time",
             "Knob 7: Release",
-            " Per-slice ADSR",
-            " (0-2 seconds each)"
+            " 0-2s",
+            "",
+            "Knob 8: Mode",
+            "Choke follows on",
+            "the next knob page."
           ]
         },
         {
